@@ -42,6 +42,8 @@ Dodatkowo:
 | 15:41:32 | Mitygacja 2/2: zwolnienie wyciekłych połączeń | `kubectl rollout restart deploy/kantyna-orders-api` + `rollout status` | `successfully rolled out` | wykonane |
 | 15:42:47 | Weryfikacja mitygacji | `setup/check.sh` | **SUKCES: 11/11** | usługa przywrócona |
 | 15:45 | Naprawa (ja): pipeline z lab03 nie był zacommitowany, a `--reuse-values` nie wymuszało flag z repo | `helm template ... --set-json "flags=<.flags z values.yaml>"` + `helm lint` | ConfigMap z flagami `false`; `0 chart(s) failed` | commit niżej |
+| 15:55 | Naprawa, commit `f7087ec` | run [46019927747](https://github.com/emsahul/aiops-praktyka/actions/runs/46019927747) | ❌ `helm upgrade` rev 3 `failed`: konflikt server-side apply z `kubectl-patch` (`kantyna-flags .data.flags.json`) i `kubectl-edit` (`kantyna-web` image, ręczna zmiana z 25.11). Częściowo wdrożone: orders-api/payments/worker na `:f7087ec`, `check.sh` dalej 11/11 | nieudany |
+| 16:00 | (ja): Helm 4 nie nadpisuje ręcznych zmian bez `--force-conflicts` | `helm history kantyna` | opis rev 3: `Apply failed with 1 conflict: conflict with "kubectl-patch"` | potwierdzona; dodaję `--force-conflicts` |
 
 ## Pierwszy komunikat (krok 2)
 

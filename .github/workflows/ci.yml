@@ -155,6 +155,8 @@ jobs:
       # loadgen.image.pinTag=true: global.imageTag nie może przestawić loadgena na SHA, którego nie budujemy.
       # Flagi zawsze z repo (incydent 2026-11-27): --reuse-values nie może utrwalić ręcznie
       # włączonych flag awarii, a każde wdrożenie nadpisuje zmiany zrobione poza pipeline'em.
+      # --force-conflicts: Helm 4 wdraża przez server-side apply i bez tej flagi przerywa upgrade,
+      # gdy pole zmienił ręcznie kubectl patch/edit (run 46019927747, rev 3 failed).
       - name: helm upgrade
         run: |
           FLAGS_JSON=$(yq -o=json -I=0 '.flags' app/deploy/helm/kantyna/values.yaml)
@@ -166,6 +168,7 @@ jobs:
             --set global.imageTag="$GITHUB_SHA" \
             --set loadgen.image.pinTag=true \
             --set-json "flags=${FLAGS_JSON}" \
+            --force-conflicts \
             --timeout 10m
 
       - name: rollout status
