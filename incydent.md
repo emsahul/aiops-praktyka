@@ -44,6 +44,16 @@ Dodatkowo:
 | 15:45 | Naprawa (ja): pipeline z lab03 nie był zacommitowany, a `--reuse-values` nie wymuszało flag z repo | `helm template ... --set-json "flags=<.flags z values.yaml>"` + `helm lint` | ConfigMap z flagami `false`; `0 chart(s) failed` | commit niżej |
 | 15:55 | Naprawa, commit `f7087ec` | run [46019927747](https://github.com/emsahul/aiops-praktyka/actions/runs/46019927747) | ❌ `helm upgrade` rev 3 `failed`: konflikt server-side apply z `kubectl-patch` (`kantyna-flags .data.flags.json`) i `kubectl-edit` (`kantyna-web` image, ręczna zmiana z 25.11). Częściowo wdrożone: orders-api/payments/worker na `:f7087ec`, `check.sh` dalej 11/11 | nieudany |
 | 16:00 | (ja): Helm 4 nie nadpisuje ręcznych zmian bez `--force-conflicts` | `helm history kantyna` | opis rev 3: `Apply failed with 1 conflict: conflict with "kubectl-patch"` | potwierdzona; dodaję `--force-conflicts` |
+| 16:03 | **Naprawa, commit `5742bbb`** (`5742bbb9a6952e84fa2674c73bd46315b71f89f2`) | run [46021241476](https://github.com/emsahul/aiops-praktyka/actions/runs/46021241476) | ✅ wszystkie joby `success`; helm rev 4 `deployed`; 4 serwisy na `:5742bbb…`; właścicielem `kantyna-flags` jest tylko `helm Apply` (zniknął `kubectl-patch`); flagi `false` | **naprawione** |
+| 16:04:29 | Weryfikacja po naprawie | `setup/check.sh` | **SUKCES: 11/11** | OK; trzeba jeszcze 5 min stabilnych metryk w Grafanie (krok 5) |
+
+## Naprawa (krok 4)
+
+- **Mitygacja:** 15:41 ręczne wyłączenie flag + restart orders-api, usługa wróciła o 15:42:47.
+- **Naprawa (commity w forku):**
+  - `f7087ec`: pipeline z lab03 dodany do repo, `helm upgrade` dostaje `--set-json flags=<.flags z values.yaml>`. Run [46019927747](https://github.com/emsahul/aiops-praktyka/actions/runs/46019927747) ❌ przez konflikty SSA.
+  - `5742bbb`: `--force-conflicts`. Run [46021241476](https://github.com/emsahul/aiops-praktyka/actions/runs/46021241476) ✅.
+- **Skutek uboczny do post-mortem:** wdrożenie nadpisało też ręczną zmianę obrazu `kantyna-web` (`kubectl-edit` z 25.11, `web:1.0.0`). Teraz web działa na obrazie z pipeline'u.
 
 ## Pierwszy komunikat (krok 2)
 
