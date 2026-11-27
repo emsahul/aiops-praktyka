@@ -1,0 +1,207 @@
+name: CI/CD Kantyna
+
+# PR: tylko testy. Push na main: testy → build i push 4 obrazów do ECR → helm upgrade → smoke test.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - ".github/workflows/ci.yml"
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Na PR anulujemy starsze przebiegi; wdrożenia na main idą po kolei, bez przerywania.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  AWS_REGION: eu-central-1
+  EKS_CLUSTER: aiops
+  HELM_VERSION: v4.3.0
+
+jobs:
+  test-orders-api:
+    name: Testy orders-api
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: app/orders-api
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: app/orders-api/uv.lock
+
+      - name: Zależności
+        run: uv sync --locked
+
+      - name: pytest
+        run: uv run pytest -q
+
+  test-payments:
+    name: Testy payments
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: app/payments
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: app/payments/go.mod
+          cache-dependency-path: app/payments/go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+  build:
+    name: Build ${{ matrix.service }}
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test-orders-api, test-payments]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: true
+      matrix:
+        # Postgresa i loadgena nie budujemy.
+        service: [orders-api, payments, worker, web]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@45666896f5d8e0f10ae255413f3a4cdd03bdc8f5 # v6.3.1
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@7290e214a610b32bc0eef81748948b6d466a8783 # v2.2.0
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: app/${{ matrix.service }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ vars.ECR_REGISTRY }}/kantyna/${{ matrix.service }}:${{ github.sha }}
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            APP_VARIANT=stable
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  deploy:
+    name: Wdrożenie (helm upgrade)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+      K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: aws-actions/configure-aws-credentials@45666896f5d8e0f10ae255413f3a4cdd03bdc8f5 # v6.3.1
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Przypięty Helm, nie ten z obrazu runnera.
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Wersja Helma
+        run: |
+          helm version --short
+          helm version --short | grep -q "^${HELM_VERSION}" || { echo "::error::Oczekiwano Helm ${HELM_VERSION}"; exit 1; }
+
+      - name: kubeconfig
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+
+      # loadgen.image.pinTag=true: global.imageTag nie może przestawić loadgena na SHA, którego nie budujemy.
+      # Flagi zawsze z repo (incydent 2026-11-27): --reuse-values nie może utrwalić ręcznie
+      # włączonych flag awarii, a każde wdrożenie nadpisuje zmiany zrobione poza pipeline'em.
+      - name: helm upgrade
+        run: |
+          FLAGS_JSON=$(yq -o=json -I=0 '.flags' app/deploy/helm/kantyna/values.yaml)
+          echo "Flagi z repo: ${FLAGS_JSON}"
+          helm upgrade kantyna app/deploy/helm/kantyna \
+            --namespace "$K8S_NAMESPACE" \
+            --reuse-values \
+            --set global.imageRegistry="$ECR_REGISTRY" \
+            --set global.imageTag="$GITHUB_SHA" \
+            --set loadgen.image.pinTag=true \
+            --set-json "flags=${FLAGS_JSON}" \
+            --timeout 10m
+
+      - name: rollout status
+        run: |
+          for d in orders-api payments worker web; do
+            kubectl -n "$K8S_NAMESPACE" rollout status "deployment/kantyna-$d" --timeout=5m
+          done
+
+      - name: Smoke test /healthz (z wnętrza klastra)
+        run: |
+          pod="smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          overrides=$(cat <<EOF
+          {
+            "apiVersion": "v1",
+            "spec": {
+              "nodeSelector": {"aiops/pool": "participants"},
+              "tolerations": [{"key": "aiops/pool", "operator": "Equal", "value": "participants", "effect": "NoSchedule"}],
+              "securityContext": {"runAsNonRoot": true, "runAsUser": 100, "seccompProfile": {"type": "RuntimeDefault"}},
+              "containers": [{
+                "name": "${pod}",
+                "image": "curlimages/curl:8.23.0",
+                "command": ["sh", "-c", "curl -fsS --retry 5 --retry-connrefused --retry-delay 3 http://kantyna-orders-api:8000/healthz && echo && curl -fsS --retry 5 --retry-connrefused --retry-delay 3 http://kantyna-payments:8080/healthz && echo && curl -fsS --retry 5 --retry-connrefused --retry-delay 3 http://kantyna-web:8080/healthz && echo"],
+                "securityContext": {"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": {"drop": ["ALL"]}}
+              }]
+            }
+          }
+          EOF
+          )
+          kubectl -n "$K8S_NAMESPACE" run "$pod" \
+            --image=curlimages/curl:8.23.0 \
+            --restart=Never --rm -i \
+            --pod-running-timeout=3m \
+            --overrides="$overrides"
+
+      - name: Obrazy w namespace
+        if: always()
+        run: |
+          kubectl -n "$K8S_NAMESPACE" get deploy \
+            -o custom-columns='NAME:.metadata.name,IMAGE:.spec.template.spec.containers[*].image'
